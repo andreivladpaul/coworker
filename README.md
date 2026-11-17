@@ -1,143 +1,143 @@
 # Coworker - README
 
-Questo documento descrive la struttura del progetto **Coworker** e il ruolo dei tre file principali:
+This document describes the structure of the **Coworker** project and the role of its three main files:
 
 - `coworker.py`
 - `coworker_tools.py`
 - `app.py`
 
-L'obiettivo del progetto e costruire un agente AI "co-worker" capace di:
+The goal is to build an AI coworker agent that can:
 
-- ricevere un task con criteri di successo,
-- usare strumenti reali (browser, filesystem, web search, notifiche),
-- fermarsi quando serve approvazione umana,
-- riprendere il lavoro dal punto esatto in cui si era interrotto.
-
----
-
-## Panoramica architetturale
-
-L'architettura e separata in 3 livelli:
-
-1. **Orchestrazione agente** (`coworker.py`)
-2. **Integrazione tool e sessioni MCP** (`coworker_tools.py`)
-3. **Interfaccia utente Gradio** (`app.py`)
-
-Questa separazione rende il progetto estendibile e riusabile in altri casi d'uso.
+- receive a task with success criteria,
+- use real tools (browser, filesystem, web search, notifications),
+- pause when human approval is required,
+- resume exactly from the point where it stopped.
 
 ---
 
-## 1) `coworker.py` - cervello e loop di controllo
+## Architecture Overview
 
-`coworker.py` contiene la classe `Coworker`, che coordina tutto il ciclo operativo.
+The architecture is split into three layers:
 
-### Responsabilita principali
+1. **Agent orchestration** (`coworker.py`)
+2. **Tool integration and MCP sessions** (`coworker_tools.py`)
+3. **Gradio user interface** (`app.py`)
 
-- inizializzare worker, middleware, memoria e evaluator (`setup`),
-- avviare un turno utente (`run_turn`),
-- gestire pause e resume (`_advance`, `resume`),
-- verificare se i criteri sono soddisfatti (`evaluate`),
-- chiudere risorse esterne (`cleanup`).
-
-### Componenti chiave
-
-- **`TolerateToolErrors`**: middleware custom che intercetta errori tool e li restituisce come `ToolMessage` invece di far fallire il run.
-- **`HumanInTheLoopMiddleware`**: mette in pausa il run su tool sensibili (es. `send_push_notification`, `request_human_help`).
-- **`TodoListMiddleware`**: mantiene una todo list live visualizzabile in UI.
-- **`PIIMiddleware`**: redazione PII in input/output tool.
-- **`ModelCallLimitMiddleware`**: evita loop infiniti con limite chiamate modello.
-
-### Flusso logico del turno
-
-1. `run_turn()` salva task e criteri, crea payload e invoca `_advance()`.
-2. `_advance()` streamma il worker.
-3. Se trova `__interrupt__`, imposta stato `paused` e ritorna alla UI.
-4. Se non c'e interrupt, prende la risposta e la passa a `evaluate()`.
-5. Se criteri non soddisfatti, costruisce feedback e fa un nuovo tentativo (max `MAX_ATTEMPTS`).
-6. `resume()` crea un `Command(resume=...)` e continua dallo stesso thread.
+This separation keeps the project extensible and reusable across use cases.
 
 ---
 
-## 2) `coworker_tools.py` - toolbox e sessioni persistenti
+## 1) `coworker.py` - Core Logic and Control Loop
 
-`coworker_tools.py` definisce i tool e gestisce le sessioni MCP (browser + filesystem).
+`coworker.py` contains the `Coworker` class, which coordinates the full execution lifecycle.
 
-### Tool inclusi
+### Main Responsibilities
+
+- initialize worker, middleware, memory, and evaluator (`setup`),
+- start a user turn (`run_turn`),
+- handle pause/resume flow (`_advance`, `resume`),
+- verify whether success criteria are met (`evaluate`),
+- close external resources (`cleanup`).
+
+### Key Components
+
+- **`TolerateToolErrors`**: custom middleware that catches tool errors and returns them as `ToolMessage` instead of crashing the run.
+- **`HumanInTheLoopMiddleware`**: pauses the run on sensitive tools (for example `send_push_notification`, `request_human_help`).
+- **`TodoListMiddleware`**: maintains a live todo list shown in the UI.
+- **`PIIMiddleware`**: redacts PII in tool input/output.
+- **`ModelCallLimitMiddleware`**: prevents infinite loops by limiting model calls.
+
+### Turn Execution Flow
+
+1. `run_turn()` saves task and criteria, builds the payload, and calls `_advance()`.
+2. `_advance()` streams worker execution.
+3. If `__interrupt__` appears, it sets state to `paused` and returns to the UI.
+4. If there is no interrupt, it takes the response and sends it to `evaluate()`.
+5. If criteria are not satisfied, it generates feedback and retries (up to `MAX_ATTEMPTS`).
+6. `resume()` creates `Command(resume=...)` and continues on the same thread.
+
+---
+
+## 2) `coworker_tools.py` - Tooling and Persistent Sessions
+
+`coworker_tools.py` defines tools and manages MCP sessions (browser + filesystem).
+
+### Included Tools
 
 - `search` (Serper)
 - `wikipedia_lookup`
 - `send_push_notification`
 - `request_human_help`
-- tool MCP caricati dinamicamente da:
-  - server Playwright (browser)
-  - server Filesystem (sandbox)
+- MCP tools dynamically loaded from:
+  - Playwright server (browser)
+  - Filesystem server (sandbox)
 
-### `McpSessions`: perche e importante
+### `McpSessions`: Why It Matters
 
-La classe `McpSessions` mantiene aperte sessioni MCP persistenti tra le tool call.
+The `McpSessions` class keeps persistent MCP sessions open across tool calls.
 
-- `_run()` apre sessioni e carica i tool.
-- `self._ready.set()` segnala che i server sono pronti.
-- `_stop.wait()` tiene il task vivo finche non arriva stop.
-- `stop()` attiva chiusura pulita delle sessioni.
+- `_run()` opens sessions and loads tools.
+- `self._ready.set()` signals that servers are ready.
+- `_stop.wait()` keeps the task alive until stop is requested.
+- `stop()` triggers graceful shutdown.
 
-Questo approccio e fondamentale per mantenere stato nel browser durante task lunghi.
+This approach is essential to preserve browser state during long-running tasks.
 
-### Sandbox filesystem
+### Filesystem Sandbox
 
-Il filesystem MCP viene avviato con una root `sandbox` dedicata, cosi i file prodotti dall'agente restano confinati in una directory controllata.
-
----
-
-## 3) `app.py` - UI e wiring eventi
-
-`app.py` espone il Coworker tramite Gradio.
-
-### Funzioni principali
-
-- `setup()`: crea istanza `Coworker` e avvia tool/sessioni.
-- `process_message()`: invia richiesta utente a `run_turn()`.
-- `approve()`: richiama `resume()` quando il run e in pausa.
-- `watch_todos()`: aggiorna periodicamente il pannello piano/todo.
-- `reset()`: chiude sessioni e ricrea Coworker da zero.
-
-### Gestione visibilita bottone approvazione
-
-Il bottone "Approve and continue" e controllato da `coworker.paused`:
-
-- visibile solo quando c'e un interrupt,
-- nascosto quando il flusso riprende o termina.
+The filesystem MCP server starts with a dedicated `sandbox` root, so files produced by the agent stay confined to a controlled directory.
 
 ---
 
-## Flusso end-to-end
+## 3) `app.py` - UI and Event Wiring
 
-1. UI avvia `setup()`.
-2. `coworker.setup()` carica tool + worker + middleware + evaluator.
-3. Utente invia task e criteri.
-4. Worker lavora con tool reali.
-5. Se serve approvazione, il run si ferma e la UI mostra il bottone.
-6. Con `approve()`, il run riparte da dove era fermo.
-7. Evaluator decide se il task e completato o se serve un nuovo tentativo.
-8. `cleanup()` chiude MCP e browser.
+`app.py` exposes Coworker through Gradio.
 
----
+### Main Functions
 
-## Come estendere il progetto
+- `setup()`: creates a `Coworker` instance and starts tools/sessions.
+- `process_message()`: sends a user request to `run_turn()`.
+- `approve()`: calls `resume()` when the run is paused.
+- `watch_todos()`: periodically refreshes the plan/todo panel.
+- `reset()`: closes sessions and recreates Coworker from scratch.
 
-- Aggiungere tool custom in `coworker_tools.py`.
-- Estendere `interrupt_on` per richiedere approvazione su altre azioni.
-- Personalizzare il prompt in `WORKER_PROMPT` per nuovi domini.
-- Rafforzare l'evaluator con rubriche piu specifiche.
-- Evolvere la UI con scelte `approve/reject/edit` per ogni action request.
+### Approval Button Visibility
+
+The "Approve and continue" button is controlled by `coworker.paused`:
+
+- visible only when an interrupt is active,
+- hidden when execution resumes or completes.
 
 ---
 
-## Note operative
+## End-to-End Flow
 
-- Il progetto usa variabili ambiente (`.env`) per API key e notifiche.
-- Browser e filesystem MCP sono avviati in sessioni persistenti, quindi un reset/cleanup corretto e importante.
-- In ambiente Windows/Jupyter puo servire la patch stderr descritta nel notebook del lab.
+1. The UI starts with `setup()`.
+2. `coworker.setup()` loads tools, worker, middleware, and evaluator.
+3. The user sends a task and success criteria.
+4. The worker runs with real tools.
+5. If approval is needed, execution pauses and the UI shows the button.
+6. With `approve()`, execution resumes from the exact stop point.
+7. The evaluator decides whether the task is complete or needs another attempt.
+8. `cleanup()` closes MCP servers and the browser.
+
+---
+
+## How To Extend The Project
+
+- Add custom tools in `coworker_tools.py`.
+- Extend `interrupt_on` to require approval for additional actions.
+- Customize `WORKER_PROMPT` for new domains.
+- Strengthen the evaluator with more specific rubrics.
+- Evolve the UI with `approve/reject/edit` options per action request.
+
+---
+
+## Operational Notes
+
+- The project uses environment variables (`.env`) for API keys and notifications.
+- Browser and filesystem MCP servers run in persistent sessions, so proper reset/cleanup is important.
+- On Windows/Jupyter setups, you may need the stderr patch documented in the lab notebook.
 
 ---
 
